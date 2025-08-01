@@ -26,17 +26,21 @@ void main() async {
   /// await LiveKitClient.initialize(
   ///  bypassVoiceProcessing: lkPlatformIsMobile(),
   /// );
-  runApp(const LiveKitExampleApp());
+  runApp(
+    ProviderScope(
+      child: const LiveKitExampleApp(),
+    ),
+  );
 }
 
-class LiveKitExampleApp extends StatelessWidget {
+class LiveKitExampleApp extends ConsumerWidget {
   //
   const LiveKitExampleApp({
     super.key,
   });
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
+  Widget build(BuildContext context, WidgetRef ref) => MaterialApp(
         title: 'LiveKit Flutter Example',
         theme: LiveKitTheme().buildThemeData(context),
         home: const ConnectPage(),

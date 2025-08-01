@@ -5,13 +5,17 @@ import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_background/flutter_background.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../exts.dart';
+import '../providers/room_provider.dart';
+import '../providers/participant_provider.dart';
+import '../providers/audio_provider.dart';
+import '../providers/voice_provider.dart';
 
-class ControlsWidget extends StatefulWidget {
-  //
+class ControlsWidget extends ConsumerStatefulWidget {
   final Room room;
   final LocalParticipant participant;
 
@@ -22,459 +26,355 @@ class ControlsWidget extends StatefulWidget {
   });
 
   @override
-  State<StatefulWidget> createState() => _ControlsWidgetState();
+  ConsumerState<ControlsWidget> createState() => _ControlsWidgetState();
 }
 
-class _ControlsWidgetState extends State<ControlsWidget> {
-  //
+class _ControlsWidgetState extends ConsumerState<ControlsWidget> {
   CameraPosition position = CameraPosition.front;
-
-  List<MediaDevice>? _audioInputs;
-  List<MediaDevice>? _audioOutputs;
-  List<MediaDevice>? _videoInputs;
-
-  StreamSubscription? _subscription;
-
-  bool _speakerphoneOn = Hardware.instance.speakerOn ?? false;
 
   @override
   void initState() {
     super.initState();
-    participant.addListener(_onChange);
-    _subscription = Hardware.instance.onDeviceChange.stream
-        .listen((List<MediaDevice> devices) {
-      _loadDevices(devices);
-    });
-    Hardware.instance.enumerateDevices().then(_loadDevices);
+    widget.participant.addListener(_onChange);
   }
 
   @override
   void dispose() {
-    _subscription?.cancel();
-    participant.removeListener(_onChange);
+    widget.participant.removeListener(_onChange);
     super.dispose();
   }
 
-  LocalParticipant get participant => widget.participant;
-
-  void _loadDevices(List<MediaDevice> devices) async {
-    _audioInputs = devices.where((d) => d.kind == 'audioinput').toList();
-    _audioOutputs = devices.where((d) => d.kind == 'audiooutput').toList();
-    _videoInputs = devices.where((d) => d.kind == 'videoinput').toList();
-    setState(() {});
-  }
-
   void _onChange() {
-    // trigger refresh
     setState(() {});
   }
 
-  void _unpublishAll() async {
-    final result = await context.showUnPublishDialog();
-    if (result == true) await participant.unpublishAllTracks();
-  }
+  bool get _enableAudio => widget.participant.isMicrophoneEnabled();
 
-  bool get isMuted => participant.isMuted;
+  bool get _enableVideo => widget.participant.isCameraEnabled();
 
-  void _disableAudio() async {
-    await participant.setMicrophoneEnabled(false);
-  }
-
-  Future<void> _enableAudio() async {
-    await participant.setMicrophoneEnabled(true);
-  }
-
-  void _disableVideo() async {
-    await participant.setCameraEnabled(false);
-  }
-
-  void _enableVideo() async {
-    await participant.setCameraEnabled(true);
-  }
-
-  void _selectAudioOutput(MediaDevice device) async {
-    await widget.room.setAudioOutputDevice(device);
-    setState(() {});
-  }
-
-  void _selectAudioInput(MediaDevice device) async {
-    await widget.room.setAudioInputDevice(device);
-    setState(() {});
-  }
-
-  void _selectVideoInput(MediaDevice device) async {
-    await widget.room.setVideoInputDevice(device);
-    setState(() {});
-  }
-
-  void _setSpeakerphoneOn() async {
-    _speakerphoneOn = !_speakerphoneOn;
-    await widget.room.setSpeakerOn(_speakerphoneOn, forceSpeakerOutput: false);
-    setState(() {});
-  }
-
-  void _toggleCamera() async {
-    final track = participant.videoTrackPublications.firstOrNull?.track;
-    if (track == null) return;
-
-    try {
-      final newPosition = position.switched();
-      await track.setCameraPosition(newPosition);
-      setState(() {
-        position = newPosition;
-      });
-    } catch (error) {
-      print('could not restart track: $error');
-      return;
-    }
-  }
-
-  void _enableScreenShare() async {
-    if (lkPlatformIsDesktop()) {
-      try {
-        final source = await showDialog<DesktopCapturerSource>(
-          context: context,
-          builder: (context) => ScreenSelectDialog(),
-        );
-        if (source == null) {
-          print('cancelled screenshare');
-          return;
-        }
-        print('DesktopCapturerSource: ${source.id}');
-        var track = await LocalVideoTrack.createScreenShareTrack(
-          ScreenShareCaptureOptions(
-            sourceId: source.id,
-            maxFrameRate: 15.0,
-          ),
-        );
-        await participant.publishVideoTrack(track);
-      } catch (e) {
-        print('could not publish video: $e');
-      }
-      return;
-    }
-    if (lkPlatformIs(PlatformType.android)) {
-      // Android specific
-      bool hasCapturePermission = await Helper.requestCapturePermission();
-      if (!hasCapturePermission) {
-        return;
-      }
-
-      requestBackgroundPermission([bool isRetry = false]) async {
-        // Required for android screenshare.
-        try {
-          bool hasPermissions = await FlutterBackground.hasPermissions;
-          if (!isRetry) {
-            const androidConfig = FlutterBackgroundAndroidConfig(
-              notificationTitle: 'Screen Sharing',
-              notificationText: 'LiveKit Example is sharing the screen.',
-              notificationImportance: AndroidNotificationImportance.normal,
-              notificationIcon: AndroidResource(
-                  name: 'livekit_ic_launcher', defType: 'mipmap'),
-            );
-            hasPermissions = await FlutterBackground.initialize(
-                androidConfig: androidConfig);
-          }
-          if (hasPermissions &&
-              !FlutterBackground.isBackgroundExecutionEnabled) {
-            await FlutterBackground.enableBackgroundExecution();
-          }
-        } catch (e) {
-          if (!isRetry) {
-            return await Future<void>.delayed(const Duration(seconds: 1),
-                () => requestBackgroundPermission(true));
-          }
-          print('could not publish video: $e');
-        }
-      }
-
-      await requestBackgroundPermission();
-    }
-
-    if (lkPlatformIsWebMobile()) {
-      await context
-          .showErrorDialog('Screen share is not supported on mobile web');
-      return;
-    }
-    await participant.setScreenShareEnabled(true, captureScreenAudio: true);
-  }
-
-  void _disableScreenShare() async {
-    await participant.setScreenShareEnabled(false);
-    if (lkPlatformIs(PlatformType.android)) {
-      // Android specific
-      try {
-        //   await FlutterBackground.disableBackgroundExecution();
-      } catch (error) {
-        print('error disabling screen share: $error');
-      }
-    }
-  }
-
-  void _onTapDisconnect() async {
-    final result = await context.showDisconnectDialog();
-    if (result == true) await widget.room.disconnect();
-  }
-
-  void _onTapUpdateSubscribePermission() async {
-    final result = await context.showSubscribePermissionDialog();
-    if (result != null) {
-      try {
-        widget.room.localParticipant?.setTrackSubscriptionPermissions(
-          allParticipantsAllowed: result,
-        );
-      } catch (error) {
-        await context.showErrorDialog(error);
-      }
-    }
-  }
-
-  void _onTapSimulateScenario() async {
-    final result = await context.showSimulateScenarioDialog();
-    if (result != null) {
-      print('${result}');
-
-      if (SimulateScenarioResult.e2eeKeyRatchet == result) {
-        await widget.room.e2eeManager?.ratchetKey();
-      }
-
-      if (SimulateScenarioResult.participantMetadata == result) {
-        widget.room.localParticipant?.setMetadata(
-            'new metadata ${widget.room.localParticipant?.identity}');
-      }
-
-      if (SimulateScenarioResult.participantName == result) {
-        widget.room.localParticipant
-            ?.setName('new name for ${widget.room.localParticipant?.identity}');
-      }
-
-      await widget.room.sendSimulateScenario(
-        speakerUpdate:
-            result == SimulateScenarioResult.speakerUpdate ? 3 : null,
-        signalReconnect:
-            result == SimulateScenarioResult.signalReconnect ? true : null,
-        fullReconnect:
-            result == SimulateScenarioResult.fullReconnect ? true : null,
-        nodeFailure: result == SimulateScenarioResult.nodeFailure ? true : null,
-        migration: result == SimulateScenarioResult.migration ? true : null,
-        serverLeave: result == SimulateScenarioResult.serverLeave ? true : null,
-        switchCandidate:
-            result == SimulateScenarioResult.switchCandidate ? true : null,
-      );
-    }
-  }
-
-  void _onTapSendData() async {
-    final result = await context.showSendDataDialog();
-    if (result == true) {
-      await widget.participant.publishData(
-        utf8.encode('This is a sample data message'),
-      );
-    }
-  }
+  bool get _enableScreenShare => widget.participant.isScreenShareEnabled();
 
   @override
   Widget build(BuildContext context) {
+    // Watch providers for reactive UI updates
+    final audioInputDevices = ref.watch(audioInputDevicesProvider);
+    final audioOutputDevices = ref.watch(audioOutputDevicesProvider);
+    final selectedAudioInput = ref.watch(selectedAudioInputProvider);
+    final selectedAudioOutput = ref.watch(selectedAudioOutputProvider);
+    final speakerphoneOn = ref.watch(speakerphoneOnProvider);
+    final voiceChatSettings = ref.watch(voiceChatSettingsNotifierProvider);
+    final pushToTalkState = ref.watch(pushToTalkNotifierProvider);
+    final currentSpeakers = ref.watch(currentSpeakersProvider);
+
     return Padding(
       padding: const EdgeInsets.symmetric(
-        vertical: 15,
-        horizontal: 15,
+        vertical: 10,
+        horizontal: 10,
       ),
       child: Wrap(
         alignment: WrapAlignment.center,
         spacing: 5,
-        runSpacing: 5,
         children: [
-          IconButton(
-            onPressed: _unpublishAll,
-            icon: const Icon(Icons.cancel),
-            tooltip: 'Unpublish all',
-          ),
-          if (participant.isMicrophoneEnabled())
-            if (lkPlatformIs(PlatformType.android))
-              IconButton(
-                onPressed: _disableAudio,
-                icon: const Icon(Icons.mic),
-                tooltip: 'mute audio',
-              )
-            else
-              PopupMenuButton<MediaDevice>(
-                icon: const Icon(Icons.settings_voice),
-                offset: const Offset(0, -90),
-                itemBuilder: (BuildContext context) {
-                  return [
-                    PopupMenuItem<MediaDevice>(
-                      value: null,
-                      onTap: isMuted ? _enableAudio : _disableAudio,
-                      child: const ListTile(
-                        leading: Icon(
-                          Icons.mic_off,
-                          color: Colors.white,
-                        ),
-                        title: Text('Mute Microphone'),
-                      ),
-                    ),
-                    if (_audioInputs != null)
-                      ..._audioInputs!.map((device) {
-                        return PopupMenuItem<MediaDevice>(
-                          value: device,
-                          child: ListTile(
-                            leading: (device.deviceId ==
-                                    widget.room.selectedAudioInputDeviceId)
-                                ? const Icon(
-                                    Icons.check_box_outlined,
-                                    color: Colors.white,
-                                  )
-                                : const Icon(
-                                    Icons.check_box_outline_blank,
-                                    color: Colors.white,
-                                  ),
-                            title: Text(device.label),
-                          ),
-                          onTap: () => _selectAudioInput(device),
-                        );
-                      })
-                  ];
-                },
-              )
-          else
-            IconButton(
-              onPressed: _enableAudio,
-              icon: const Icon(Icons.mic_off),
-              tooltip: 'un-mute audio',
+          // Voice Mode Toggle
+          if (lkPlatformIs(PlatformType.android) || lkPlatformIs(PlatformType.iOS))
+            PopupMenuButton<VoiceChatMode>(
+              icon: Container(
+                decoration: BoxDecoration(
+                  color: voiceChatSettings.mode == VoiceChatMode.pushToTalk 
+                      ? (pushToTalkState ? Colors.red : Colors.grey)
+                      : (voiceChatSettings.mode == VoiceChatMode.voiceActivated ? Colors.green : Colors.blue),
+                  borderRadius: BorderRadius.circular(25),
+                ),
+                child: const Padding(
+                  padding: EdgeInsets.all(12),
+                  child: Icon(Icons.mic_none, color: Colors.white),
+                ),
+              ),
+              onSelected: (mode) {
+                ref.read(voiceChatSettingsNotifierProvider.notifier).updateMode(mode);
+              },
+              itemBuilder: (context) => [
+                const PopupMenuItem(
+                  value: VoiceChatMode.openMic,
+                  child: Text('Open Mic'),
+                ),
+                const PopupMenuItem(
+                  value: VoiceChatMode.pushToTalk,
+                  child: Text('Push to Talk'),
+                ),
+                const PopupMenuItem(
+                  value: VoiceChatMode.voiceActivated,
+                  child: Text('Voice Activated'),
+                ),
+              ],
             ),
-          if (!lkPlatformIsMobile())
+
+          // Push to Talk Button (only show in push-to-talk mode)
+          if (voiceChatSettings.mode == VoiceChatMode.pushToTalk)
+            GestureDetector(
+              onTapDown: (_) {
+                ref.read(pushToTalkNotifierProvider.notifier).startTalking();
+              },
+              onTapUp: (_) {
+                ref.read(pushToTalkNotifierProvider.notifier).stopTalking();
+              },
+              onTapCancel: () {
+                ref.read(pushToTalkNotifierProvider.notifier).stopTalking();
+              },
+              child: Container(
+                decoration: BoxDecoration(
+                  color: pushToTalkState ? Colors.red : Colors.grey,
+                  borderRadius: BorderRadius.circular(25),
+                ),
+                child: const Padding(
+                  padding: EdgeInsets.all(12),
+                  child: Icon(Icons.push_pin, color: Colors.white),
+                ),
+              ),
+            ),
+
+          // Microphone Toggle
+          IconButton(
+            onPressed: () async {
+              await ref.read(localParticipantControlsNotifierProvider.notifier).toggleMicrophone();
+            },
+            icon: Icon(
+              _enableAudio ? Icons.mic : Icons.mic_off,
+              color: _enableAudio ? Colors.white : Colors.red,
+            ),
+            style: IconButton.styleFrom(
+              backgroundColor: _enableAudio ? Colors.green : Colors.red.withOpacity(0.8),
+            ),
+          ),
+
+          // Video Toggle
+          IconButton(
+            onPressed: () async {
+              await ref.read(localParticipantControlsNotifierProvider.notifier).toggleCamera();
+            },
+            icon: Icon(
+              _enableVideo ? Icons.videocam : Icons.videocam_off,
+              color: _enableVideo ? Colors.white : Colors.red,
+            ),
+            style: IconButton.styleFrom(
+              backgroundColor: _enableVideo ? Colors.green : Colors.red.withOpacity(0.8),
+            ),
+          ),
+
+          // Screen Share Toggle
+          IconButton(
+            onPressed: () async {
+              await ref.read(localParticipantControlsNotifierProvider.notifier).toggleScreenShare();
+            },
+            icon: Icon(
+              _enableScreenShare ? Icons.stop_screen_share : Icons.screen_share,
+              color: _enableScreenShare ? Colors.red : Colors.white,
+            ),
+            style: IconButton.styleFrom(
+              backgroundColor: _enableScreenShare ? Colors.red : Colors.grey,
+            ),
+          ),
+
+          // Audio Input Device Selection
+          if (audioInputDevices.isNotEmpty)
+            PopupMenuButton<MediaDevice>(
+              icon: const Icon(Icons.settings_input_component),
+              onSelected: (device) {
+                ref.read(audioDeviceNotifierProvider.notifier).selectAudioInput(device);
+              },
+              itemBuilder: (context) => audioInputDevices
+                  .map((device) => PopupMenuItem(
+                        value: device,
+                        child: ListTile(
+                          leading: Icon(
+                            selectedAudioInput?.deviceId == device.deviceId
+                                ? Icons.check_circle
+                                : Icons.mic,
+                          ),
+                          title: Text(device.label),
+                          dense: true,
+                        ),
+                      ))
+                  .toList(),
+            ),
+
+          // Audio Output Device Selection
+          if (audioOutputDevices.isNotEmpty)
             PopupMenuButton<MediaDevice>(
               icon: const Icon(Icons.volume_up),
-              itemBuilder: (BuildContext context) {
-                return [
-                  const PopupMenuItem<MediaDevice>(
-                    value: null,
-                    child: ListTile(
-                      leading: Icon(
-                        Icons.speaker,
-                        color: Colors.white,
-                      ),
-                      title: Text('Select Audio Output'),
-                    ),
-                  ),
-                  if (_audioOutputs != null)
-                    ..._audioOutputs!.map((device) {
-                      return PopupMenuItem<MediaDevice>(
+              onSelected: (device) {
+                ref.read(audioDeviceNotifierProvider.notifier).selectAudioOutput(device);
+              },
+              itemBuilder: (context) => audioOutputDevices
+                  .map((device) => PopupMenuItem(
                         value: device,
                         child: ListTile(
-                          leading: (device.deviceId ==
-                                  widget.room.selectedAudioOutputDeviceId)
-                              ? const Icon(
-                                  Icons.check_box_outlined,
-                                  color: Colors.white,
-                                )
-                              : const Icon(
-                                  Icons.check_box_outline_blank,
-                                  color: Colors.white,
-                                ),
+                          leading: Icon(
+                            selectedAudioOutput?.deviceId == device.deviceId
+                                ? Icons.check_circle
+                                : Icons.speaker,
+                          ),
                           title: Text(device.label),
+                          dense: true,
                         ),
-                        onTap: () => _selectAudioOutput(device),
-                      );
-                    })
-                ];
-              },
+                      ))
+                  .toList(),
             ),
-          if (!kIsWeb && lkPlatformIsMobile())
+
+          // Speakerphone Toggle (Mobile only)
+          if (lkPlatformIs(PlatformType.android) || lkPlatformIs(PlatformType.iOS))
             IconButton(
-              disabledColor: Colors.grey,
-              onPressed: _setSpeakerphoneOn,
+              onPressed: () {
+                ref.read(audioDeviceNotifierProvider.notifier).setSpeakerphoneOn(!speakerphoneOn);
+              },
               icon: Icon(
-                  _speakerphoneOn ? Icons.speaker_phone : Icons.phone_android),
-              tooltip: 'Switch SpeakerPhone',
+                speakerphoneOn ? Icons.volume_up : Icons.phone_in_talk,
+                color: speakerphoneOn ? Colors.blue : Colors.white,
+              ),
+              style: IconButton.styleFrom(
+                backgroundColor: speakerphoneOn ? Colors.blue.withOpacity(0.2) : Colors.grey,
+              ),
             ),
-          if (participant.isCameraEnabled())
-            PopupMenuButton<MediaDevice>(
-              icon: const Icon(Icons.videocam_sharp),
-              itemBuilder: (BuildContext context) {
-                return [
-                  PopupMenuItem<MediaDevice>(
-                    value: null,
-                    onTap: _disableVideo,
-                    child: const ListTile(
-                      leading: Icon(
-                        Icons.videocam_off,
-                        color: Colors.white,
-                      ),
-                      title: Text('Disable Camera'),
-                    ),
+
+          // Voice Settings
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.tune),
+            onSelected: (value) {
+              switch (value) {
+                case 'noise_suppression':
+                  ref.read(voiceChatSettingsNotifierProvider.notifier).toggleNoiseSuppression();
+                  break;
+                case 'echo_cancellation':
+                  ref.read(voiceChatSettingsNotifierProvider.notifier).toggleEchoCancellation();
+                  break;
+                case 'auto_gain':
+                  ref.read(voiceChatSettingsNotifierProvider.notifier).toggleAutoGainControl();
+                  break;
+                case 'spatial_audio':
+                  ref.read(voiceChatSettingsNotifierProvider.notifier).toggleSpatialAudio();
+                  break;
+              }
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: 'noise_suppression',
+                child: ListTile(
+                  leading: Icon(
+                    voiceChatSettings.enableNoiseSuppression
+                        ? Icons.check_box
+                        : Icons.check_box_outline_blank,
                   ),
-                  if (_videoInputs != null)
-                    ..._videoInputs!.map((device) {
-                      return PopupMenuItem<MediaDevice>(
-                        value: device,
-                        child: ListTile(
-                          leading: (device.deviceId ==
-                                  widget.room.selectedVideoInputDeviceId)
-                              ? const Icon(
-                                  Icons.check_box_outlined,
-                                  color: Colors.white,
-                                )
-                              : const Icon(
-                                  Icons.check_box_outline_blank,
-                                  color: Colors.white,
-                                ),
-                          title: Text(device.label),
-                        ),
-                        onTap: () => _selectVideoInput(device),
-                      );
-                    })
-                ];
-              },
-            )
-          else
-            IconButton(
-              onPressed: _enableVideo,
-              icon: const Icon(Icons.videocam_off),
-              tooltip: 'un-mute video',
+                  title: const Text('Noise Suppression'),
+                  dense: true,
+                ),
+              ),
+              PopupMenuItem(
+                value: 'echo_cancellation',
+                child: ListTile(
+                  leading: Icon(
+                    voiceChatSettings.enableEchoCancellation
+                        ? Icons.check_box
+                        : Icons.check_box_outline_blank,
+                  ),
+                  title: const Text('Echo Cancellation'),
+                  dense: true,
+                ),
+              ),
+              PopupMenuItem(
+                value: 'auto_gain',
+                child: ListTile(
+                  leading: Icon(
+                    voiceChatSettings.enableAutoGainControl
+                        ? Icons.check_box
+                        : Icons.check_box_outline_blank,
+                  ),
+                  title: const Text('Auto Gain Control'),
+                  dense: true,
+                ),
+              ),
+              PopupMenuItem(
+                value: 'spatial_audio',
+                child: ListTile(
+                  leading: Icon(
+                    voiceChatSettings.enableSpatialAudio
+                        ? Icons.check_box
+                        : Icons.check_box_outline_blank,
+                  ),
+                  title: const Text('Spatial Audio'),
+                  dense: true,
+                ),
+              ),
+            ],
+          ),
+
+          // Voice Quality Indicator
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.5),
+              borderRadius: BorderRadius.circular(12),
             ),
-          IconButton(
-            icon: Icon(position == CameraPosition.back
-                ? Icons.video_camera_back
-                : Icons.video_camera_front),
-            onPressed: () => _toggleCamera(),
-            tooltip: 'toggle camera',
-          ),
-          if (participant.isScreenShareEnabled())
-            IconButton(
-              icon: const Icon(Icons.monitor_outlined),
-              onPressed: () => _disableScreenShare(),
-              tooltip: 'unshare screen (experimental)',
-            )
-          else
-            IconButton(
-              icon: const Icon(Icons.monitor),
-              onPressed: () => _enableScreenShare(),
-              tooltip: 'share screen (experimental)',
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.signal_cellular_alt,
+                  size: 16,
+                  color: _getQualityColor(voiceChatSettings.quality),
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  voiceChatSettings.quality.name.toUpperCase(),
+                  style: TextStyle(
+                    color: _getQualityColor(voiceChatSettings.quality),
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
             ),
-          IconButton(
-            onPressed: _onTapDisconnect,
-            icon: const Icon(Icons.close_sharp),
-            tooltip: 'disconnect',
           ),
+
+          // Speaking Indicator
+          if (currentSpeakers.contains(widget.participant.identity))
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.green,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: const Icon(
+                Icons.record_voice_over,
+                color: Colors.white,
+                size: 16,
+              ),
+            ),
+
+          // Disconnect Button
           IconButton(
-            onPressed: _onTapSendData,
-            icon: const Icon(Icons.message),
-            tooltip: 'send demo data',
-          ),
-          IconButton(
-            onPressed: _onTapUpdateSubscribePermission,
-            icon: const Icon(Icons.settings),
-            tooltip: 'Subscribe permission',
-          ),
-          IconButton(
-            onPressed: _onTapSimulateScenario,
-            icon: const Icon(Icons.bug_report),
-            tooltip: 'Simulate scenario',
+            onPressed: () {
+              Navigator.pop(context);
+            },
+            icon: const Icon(Icons.call_end, color: Colors.white),
+            style: IconButton.styleFrom(
+              backgroundColor: Colors.red,
+            ),
           ),
         ],
       ),
     );
+  }
+
+  Color _getQualityColor(VoiceQuality quality) {
+    switch (quality) {
+      case VoiceQuality.excellent:
+        return Colors.green;
+      case VoiceQuality.high:
+        return Colors.lightGreen;
+      case VoiceQuality.medium:
+        return Colors.orange;
+      case VoiceQuality.low:
+        return Colors.red;
+    }
   }
 }
